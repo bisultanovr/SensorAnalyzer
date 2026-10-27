@@ -1,6 +1,14 @@
 .venv/
+venv/
 __pycache__/
+*.py[cod]
 *.pyc
+.env
+.idea/
+.vscode/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
 
-# Записи с дрона - большие и личные; в репозитории только тестовые (tests/data)
 /data/
