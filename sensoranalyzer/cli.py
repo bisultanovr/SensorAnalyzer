@@ -114,6 +114,10 @@ def cmd_run(args) -> int:
         except KeyboardInterrupt:
             pipeline.stop()
             stats = pipeline.stats
+        except ValueError as e:  # параметры тракта не годятся (ProcessingParams.check)
+            pipeline.stop()
+            print(f"параметры тракта: {e}", file=sys.stderr)
+            return 2
     elapsed = time.perf_counter() - started
     print(f"\nитого за {elapsed:.1f} с: отсчётов {stats.samples}, тактов {stats.ticks}, CONFIG {stats.configs}; "
           f"потеряно на плате {stats.lost_samples}/{stats.lost_ticks}, в буфере ПК {stats.buffer_dropped} "
