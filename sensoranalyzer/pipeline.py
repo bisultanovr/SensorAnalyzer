@@ -9,6 +9,7 @@ from .buffer import RingBuffer
 from .clock import ReplayClock
 from .preprocess import ProcessingParams, SensorResult, SensorStage
 from .protocol import Config, Frame, Sample, StreamTime, Tick
+from .resample import Resampler
 from .sources import SignalSource
 
 
@@ -66,7 +67,9 @@ class Pipeline:
                  buffer_capacity: int = 8192,
                  on_result: Callable[[SensorResult], None] | None = None,
                  on_tick: Callable[[TickCheck], None] | None = None,
-                 on_config: Callable[[Config, ProcessingParams], None] | None = None) -> None:
+                 on_config: Callable[[Config, ProcessingParams], None] | None = None,
+                 resampler: Resampler | None = None,
+                 on_grid: Callable[[SensorResult], None] | None = None) -> None:
         self.source = source
         self.overrides = dict(overrides or {})
         self.buffer: RingBuffer[Frame] = RingBuffer(buffer_capacity)
@@ -75,6 +78,8 @@ class Pipeline:
         self.on_result = on_result
         self.on_tick = on_tick
         self.on_config = on_config
+        self.resampler = resampler  # блок дискретизации: отсчёты на сетку заданной частоты
+        self.on_grid = on_grid
         self.stats = PipelineStats()
         self.params: ProcessingParams | None = None
         self.firmware_config: Config | None = None
@@ -200,6 +205,10 @@ class Pipeline:
             result = self._stage.process(frame, t)
             if self.on_result:
                 self.on_result(result)
+            if self.resampler is not None:
+                for point in self.resampler.push(result):
+                    if self.on_grid:
+                        self.on_grid(point)
             return
 
         self.stats.ticks += 1

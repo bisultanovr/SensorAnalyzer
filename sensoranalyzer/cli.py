@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 import threading
 import time
@@ -11,6 +12,7 @@ from .export import export_csv
 from .pipeline import Pipeline, TickCheck
 from .preprocess import ProcessingParams, SensorResult
 from .protocol import FLAG_ARMED, Config
+from .resample import MODES, Resampler
 from .sources import CsvSource, SerialSource, open_source
 
 
@@ -155,6 +157,51 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_resample(args) -> int:
+    source = open_source(args.source)
+    if isinstance(source, CsvSource) and (errors := source.validate()):
+        print("CSV не годен:\n  " + "\n  ".join(errors), file=sys.stderr)
+        return 1
+    resampler = Resampler(args.rate, args.mode, max_gap=args.max_gap)
+    with open(args.out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(("t", *(f"{q}_{a}" for q in ("acc_g", "gyr_dps", "acc_f", "gyr_f", "gyro_shift")
+                               for a in "xyz")))
+
+        def on_grid(p: SensorResult) -> None:
+            writer.writerow((f"{p.t:.6f}", *(f"{v:.9g}" for v in
+                                             p.acc_g + p.gyr_dps + p.acc_filtered + p.gyr_filtered + p.gyro_shift)))
+
+        pipeline = Pipeline(source, overrides=parse_overrides(args.set or []), speed=0, seed=not args.no_seed,
+                            resampler=resampler, on_grid=on_grid)
+        try:
+            pipeline.run()
+        except ValueError as e:
+            print(f"параметры тракта: {e}", file=sys.stderr)
+            return 2
+    s = resampler.stats
+    print(f"вход: {s.inputs} отсчётов, в среднем {s.input_rate:.1f} Гц, шаг мин/сред/макс/СКО "
+          f"{s.dt_min * 1e3:.2f}/{s.dt_mean * 1e3:.2f}/{s.dt_max * 1e3:.2f}/{s.dt_std * 1e3:.2f} мс")
+    print(f"сетка {args.rate:g} Гц ({args.mode}): {s.outputs} точек -> {args.out}"
+          + (f"; пропущено в разрывах: {s.skipped}" if s.skipped else ""))
+    return 0
+
+
+def cmd_plot(args) -> int:
+    from .plots import make_all  # matplotlib нужен только здесь
+
+    try:
+        files = make_all(args.source, args.out, overrides=parse_overrides(args.set or []),
+                         compare=parse_overrides(args.compare) if args.compare else None,
+                         seed=not args.no_seed, t_from=args.t_from, t_to=args.t_to, rate=args.rate)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    for path in files:
+        print(path)
+    return 0
+
+
 def cmd_validate(args) -> int:
     errors = CsvSource(args.csv).validate()
     if errors:
@@ -196,6 +243,31 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("validate", help="проверить формат CSV")
     v.add_argument("csv")
     v.set_defaults(func=cmd_validate)
+
+    rs = sub.add_parser("resample", help="обработанные отсчёты на равномерную сетку, в CSV")
+    rs.add_argument("source", help="COM-порт, запись .imus или .csv")
+    rs.add_argument("out", help="CSV с точками сетки")
+    rs.add_argument("--rate", type=float, default=100.0, help="частота сетки, Гц (по умолчанию 100 - такт прошивки)")
+    rs.add_argument("--mode", choices=MODES, default="hold",
+                    help="hold - последний отсчёт, как такт прошивки; linear - интерполяция")
+    rs.add_argument("--max-gap", type=float, metavar="С",
+                    help="не выдавать точки внутри разрывов длиннее этого, с")
+    rs.add_argument("--set", action="append", metavar="ИМЯ=ЗНАЧЕНИЕ", help="переопределить параметр тракта")
+    rs.add_argument("--no-seed", action="store_true", help="запись снята с включения платы")
+    rs.set_defaults(func=cmd_resample)
+
+    pl = sub.add_parser("plot", help="графики: до/после фильтрации, спектр, АЧХ, ноль гироскопа, дискретизация")
+    pl.add_argument("source", help="запись .imus или .csv")
+    pl.add_argument("--out", default="plots", help="каталог для PNG (по умолчанию plots)")
+    pl.add_argument("--set", action="append", metavar="ИМЯ=ЗНАЧЕНИЕ", help="переопределить параметр тракта")
+    pl.add_argument("--compare", action="append", metavar="ИМЯ=ЗНАЧЕНИЕ",
+                    help="второй набор параметров для сравнения на той же записи (compare.png)")
+    pl.add_argument("--from", dest="t_from", type=float, metavar="С", help="начало отрезка, с")
+    pl.add_argument("--to", dest="t_to", type=float, metavar="С", help="конец отрезка, с")
+    pl.add_argument("--rate", type=float,
+                    help="частота сетки для спектра и иллюстрации дискретизации, Гц")
+    pl.add_argument("--no-seed", action="store_true", help="запись снята с включения платы")
+    pl.set_defaults(func=cmd_plot)
     return p
 
 
