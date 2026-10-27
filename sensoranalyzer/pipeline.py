@@ -98,8 +98,10 @@ class Pipeline:
     # --- поток чтения ---------------------------------------------------------------------
     def _read(self) -> None:
         try:
+            # Порт ждать не умеет - при переполнении теряются старые кадры; файл ждёт обработку
+            block = not self.source.realtime
             for frame in self.source.frames():
-                self.buffer.push(frame)
+                self.buffer.push(frame, block=block)
         except BaseException as e:  # ошибка порта не должна молча повесить обработку
             self.reader_error = e
         finally:

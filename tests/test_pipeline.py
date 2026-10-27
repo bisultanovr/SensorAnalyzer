@@ -51,6 +51,17 @@ class RecordedBootV2Test(unittest.TestCase):
         self.assertTrue(stats.bit_exact, stats)
 
 
+class LongRecordingTest(unittest.TestCase):
+    def test_file_longer_than_buffer_loses_nothing(self):
+        # Запись намного длиннее буфера: чтение файла обгоняет обработку, но кадры не теряются
+        results = []
+        stats = Pipeline(RecordingSource(DATA / "drone_boot_v2.imus"), speed=0, buffer_capacity=64,
+                         on_result=results.append).run()
+        self.assertEqual(stats.buffer_dropped, 0)
+        self.assertEqual(len(results), stats.samples)
+        self.assertTrue(stats.bit_exact, stats)
+
+
 class SyntheticBootTest(unittest.TestCase):
     """Поток с включения платы: без seed модель повторяет прошивку с первого отсчёта."""
 

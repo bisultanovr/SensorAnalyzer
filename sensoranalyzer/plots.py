@@ -103,6 +103,8 @@ def collect(source: str, overrides: dict[str, object] | None = None, seed: bool 
                         on_result=run.results.append, on_tick=run.checks.append,
                         on_config=lambda c, p: run.configs.append((c, p)))
     run.stats = pipeline.run()
+    if run.stats.buffer_dropped:  # для файла не должно быть: буфер придерживает чтение
+        raise RuntimeError(f"потеряно в буфере {run.stats.buffer_dropped} кадров")
     if not run.results:
         raise ValueError("в источнике нет ни одного обработанного отсчёта")
     return run

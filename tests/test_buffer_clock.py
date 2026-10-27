@@ -37,6 +37,25 @@ class RingBufferTest(unittest.TestCase):
         self.assertEqual(got, list(range(n)))
 
 
+class BlockingPushTest(unittest.TestCase):
+    def test_writer_waits_instead_of_dropping(self):
+        buf = RingBuffer(8)
+        n = 2000
+
+        def writer():
+            for i in range(n):
+                buf.push(i, block=True)
+            buf.close()
+
+        threading.Thread(target=writer).start()
+        got = []
+        while (item := buf.pop(1.0)) is not None:
+            got.append(item)
+        self.assertEqual(got, list(range(n)))
+        self.assertEqual(buf.dropped, 0)
+        self.assertLessEqual(buf.max_fill, 8)
+
+
 class FakeTime:
     def __init__(self):
         self.now = 100.0
