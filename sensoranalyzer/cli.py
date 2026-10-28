@@ -193,7 +193,8 @@ def cmd_plot(args) -> int:
     try:
         files = make_all(args.source, args.out, overrides=parse_overrides(args.set or []),
                          compare=parse_overrides(args.compare) if args.compare else None,
-                         seed=not args.no_seed, t_from=args.t_from, t_to=args.t_to, rate=args.rate)
+                         seed=not args.no_seed, t_from=args.t_from, t_to=args.t_to, rate=args.rate,
+                         report=args.report)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
@@ -267,6 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--rate", type=float,
                     help="частота сетки для спектра и иллюстрации дискретизации, Гц")
     pl.add_argument("--no-seed", action="store_true", help="запись снята с включения платы")
+    pl.add_argument("--report", action="store_true", help="под ширину страницы отчёта (16.5 см), 300 dpi")
     pl.set_defaults(func=cmd_plot)
     return p
 

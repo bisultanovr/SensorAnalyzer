@@ -30,17 +30,36 @@ GRID, AXIS = "#e1e0d9", "#c3c2b7"
 
 AXES = ("X", "Y", "Z")
 
+# Размеры рисунков заданы для экрана (ширина 11 дюймов). Для отчёта (report) они ужимаются до
+# ширины текста на листе А4 - 16.5 см, - а шрифт задаётся сразу в пунктах печати
+REPORT_WIDTH_IN = 6.5
+_scale = 1.0
+_suptitle_size = 10.5
 
-def _style() -> None:
+
+def _fs(w: float, h: float) -> tuple[float, float]:
+    return w * _scale, h * _scale
+
+
+def _suptitle(fig, text: str, **kwargs) -> None:
+    """Общий заголовок рисунка - только на экране: в отчёте его заменяет подпись под рисунком."""
+    if _scale == 1.0:
+        fig.suptitle(text, **kwargs)
+
+
+def _style(report: bool = False) -> None:
+    global _scale, _suptitle_size
+    _scale = REPORT_WIDTH_IN / 11 if report else 1.0
+    _suptitle_size = 8.5 if report else 10.5
     plt.rcParams.update({
         "font.family": ["Segoe UI", "DejaVu Sans"],
-        "font.size": 9,
+        "font.size": 7 if report else 9,
         "figure.facecolor": "white",
         "axes.facecolor": "white",
         "axes.edgecolor": AXIS,
         "axes.labelcolor": INK2,
         "axes.titlecolor": INK,
-        "axes.titlesize": 9.5,
+        "axes.titlesize": 7.5 if report else 9.5,
         "axes.spines.top": False,
         "axes.spines.right": False,
         "axes.grid": True,
@@ -52,9 +71,9 @@ def _style() -> None:
         "ytick.labelcolor": INK2,
         "text.color": INK,
         "legend.frameon": False,
-        "legend.fontsize": 8.5,
-        "lines.linewidth": 1.4,
-        "savefig.dpi": 150,
+        "legend.fontsize": 7 if report else 8.5,
+        "lines.linewidth": 1.1 if report else 1.4,
+        "savefig.dpi": 300 if report else 150,
     })
 
 
@@ -145,7 +164,7 @@ def _subtitle(run: Run) -> str:
 def plot_signals(run: Run, out: Path) -> Path:
     a = run.arrays()
     p = run.params
-    fig, axs = plt.subplots(3, 2, figsize=(11, 7), sharex=True)
+    fig, axs = plt.subplots(3, 2, figsize=_fs(11, 7), sharex=True)
     for i, ax_name in enumerate(AXES):
         for col, (raw, filt, unit, cut, what) in enumerate((
                 (a["raw_acc_g"], a["acc_g"], "g", p.acc_cut_freq, "Ускорение"),
@@ -157,7 +176,7 @@ def plot_signals(run: Run, out: Path) -> Path:
     for ax in axs[-1]:
         ax.set_xlabel("время, с")
     axs[0, 0].legend(loc="upper right", ncol=2)
-    fig.suptitle("Сигнал до и после фильтрации\n" + _subtitle(run), x=0.01, ha="left", fontsize=10.5)
+    _suptitle(fig, "Сигнал до и после фильтрации\n" + _subtitle(run), x=0.01, ha="left", fontsize=_suptitle_size)
     fig.tight_layout()
     return _save(fig, out)
 
@@ -179,7 +198,7 @@ def plot_spectrum(run: Run, out: Path, rate: float) -> Path:
     g = _grid(run, rate).arrays()
     p = run.params
     seg = 2 ** int(math.log2(max(16, min(len(g["t"]) // 4, 4096))))
-    fig, axs = plt.subplots(3, 2, figsize=(11, 7), sharex=True)
+    fig, axs = plt.subplots(3, 2, figsize=_fs(11, 7), sharex=True)
     for i, ax_name in enumerate(AXES):
         for col, (raw, filt, unit, cut, what) in enumerate((
                 (g["raw_acc_g"], g["acc_g"], "g/√Гц", p.acc_cut_freq, "Ускорение"),
@@ -195,8 +214,8 @@ def plot_spectrum(run: Run, out: Path, rate: float) -> Path:
         ax.set_xlabel("частота, Гц")
         ax.set_xlim(0, rate / 2)
     axs[0, 0].legend(loc="lower left", ncol=2)
-    fig.suptitle(f"Амплитудный спектр (Уэлч, окно {seg} точек, равномерная сетка {rate:g} Гц)\n" + _subtitle(run),
-                 x=0.01, ha="left", fontsize=10.5)
+    _suptitle(fig, f"Амплитудный спектр (Уэлч, окно {seg} точек, равномерная сетка {rate:g} Гц)\n" + _subtitle(run),
+                 x=0.01, ha="left", fontsize=_suptitle_size)
     fig.tight_layout()
     return _save(fig, out)
 
@@ -205,7 +224,7 @@ def plot_spectrum(run: Run, out: Path, rate: float) -> Path:
 def plot_response(params: ProcessingParams, out: Path) -> Path:
     rate = params.sample_rate
     f = np.linspace(0.2, rate / 2, 1200)
-    fig, axs = plt.subplots(1, 2, figsize=(11, 3.8), sharey=True)
+    fig, axs = plt.subplots(1, 2, figsize=_fs(11, 3.8), sharey=True)
     for ax, (cut, what) in zip(axs, ((params.acc_cut_freq, "ускорения"), (params.gyr_cut_freq, "угловой скорости"))):
         exact = [20 * math.log10(Pt2Filter.magnitude(cut, rate, x, True)) for x in f]
         legacy = [20 * math.log10(Pt2Filter.magnitude(cut, rate, x, False)) for x in f]
@@ -222,7 +241,7 @@ def plot_response(params: ProcessingParams, out: Path) -> Path:
         ax.set_ylim(-40, 2)
         ax.legend(loc="lower left")
     axs[0].set_ylabel("АЧХ, дБ")
-    fig.suptitle(f"АЧХ фильтров PT2 при частоте отсчётов {rate:.0f} Гц", x=0.01, ha="left", fontsize=10.5)
+    _suptitle(fig, f"АЧХ фильтров PT2 при частоте отсчётов {rate:.0f} Гц", x=0.01, ha="left", fontsize=_suptitle_size)
     fig.tight_layout()
     return _save(fig, out)
 
@@ -235,13 +254,13 @@ def plot_gyro_zero(run: Run, out: Path) -> Path | None:
     model = np.array([c.model_shift for c in run.checks])
     firmware = np.array([c.tick.gyro_shift for c in run.checks])
     diff = np.abs(model - firmware).max(axis=1)
-    fig, axs = plt.subplots(4, 1, figsize=(11, 8), sharex=True, gridspec_kw={"height_ratios": [1, 1, 1, 0.8]})
+    fig, axs = plt.subplots(4, 1, figsize=_fs(11, 8), sharex=True, gridspec_kw={"height_ratios": [1, 1, 1, 0.8]})
     for i, ax_name in enumerate(AXES):
         ax = axs[i]
         ax.plot(t, model[:, i], color=SLOT[0], label="модель на ПК")
         ax.plot(t, firmware[:, i], color=SLOT[1], ls="--", label="прошивка (кадр TICK)")
         ax.set_title(f"Ноль гироскопа {ax_name}, ед. АЦП", loc="left")
-    axs[0].legend(loc="upper right", ncol=2)
+    axs[0].legend(loc="best", ncol=2)
     ax = axs[3]
     if diff.max() > 0:
         ax.semilogy(t, np.where(diff > 0, diff, np.nan), color=SLOT[0], marker="o", ms=3, lw=0)
@@ -252,7 +271,7 @@ def plot_gyro_zero(run: Run, out: Path) -> Path | None:
         ax.text(0.5, 0.62, f"0 на всех {len(t)} тактах: модель совпадает с прошивкой бит в бит",
                 transform=ax.transAxes, ha="center", va="bottom", color=INK2)
     ax.set_xlabel("время, с")
-    fig.suptitle("Оценка нуля гироскопа: модель на ПК и прошивка\n" + _subtitle(run), x=0.01, ha="left", fontsize=10.5)
+    _suptitle(fig, "Оценка нуля гироскопа: модель на ПК и прошивка\n" + _subtitle(run), x=0.01, ha="left", fontsize=_suptitle_size)
     fig.tight_layout()
     return _save(fig, out)
 
@@ -261,7 +280,7 @@ def plot_gyro_zero(run: Run, out: Path) -> Path | None:
 def plot_sampling(run: Run, out: Path, rate: float, window: float = 0.1) -> Path:
     t = np.array([r.t for r in run.results])
     dt = np.diff(t) * 1e3
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 3.8), gridspec_kw={"width_ratios": [1, 1.4]})
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=_fs(11, 3.8), gridspec_kw={"width_ratios": [1, 1.4]})
 
     ax1.hist(dt, bins=np.arange(0, max(4.0, dt.max()) + 0.1, 0.1), color=SLOT[0], rwidth=0.85)
     ax1.axvline(dt.mean(), color=INK2, lw=0.9, ls="--")
@@ -287,7 +306,7 @@ def plot_sampling(run: Run, out: Path, rate: float, window: float = 0.1) -> Path
     ax2.set_xlabel("время, с")
     ax2.set_ylabel("°/с")
     ax2.legend(loc="best")
-    fig.suptitle("Неравномерность отсчётов и блок дискретизации\n" + _subtitle(run), x=0.01, ha="left", fontsize=10.5)
+    _suptitle(fig, "Неравномерность отсчётов и блок дискретизации\n" + _subtitle(run), x=0.01, ha="left", fontsize=_suptitle_size)
     fig.tight_layout()
     return _save(fig, out)
 
@@ -295,7 +314,7 @@ def plot_sampling(run: Run, out: Path, rate: float, window: float = 0.1) -> Path
 # --- сравнение параметров -----------------------------------------------------------------
 def plot_compare(base: Run, alt: Run, alt_label: str, out: Path) -> Path:
     a, b = base.arrays(), alt.arrays()
-    fig, axs = plt.subplots(3, 2, figsize=(11, 7), sharex=True)
+    fig, axs = plt.subplots(3, 2, figsize=_fs(11, 7), sharex=True)
     for i, ax_name in enumerate(AXES):
         for col, (key, unit, what) in enumerate((("acc_g", "g", "Ускорение"), ("gyr_dps", "°/с", "Угловая скорость"))):
             ax = axs[i, col]
@@ -305,8 +324,8 @@ def plot_compare(base: Run, alt: Run, alt_label: str, out: Path) -> Path:
     for ax in axs[-1]:
         ax.set_xlabel("время, с")
     axs[0, 0].legend(loc="upper right", ncol=2)
-    fig.suptitle(f"Сравнение параметров тракта на одной записи: {alt_label}\n" + _subtitle(base),
-                 x=0.01, ha="left", fontsize=10.5)
+    _suptitle(fig, f"Сравнение параметров тракта на одной записи: {alt_label}\n" + _subtitle(base),
+                 x=0.01, ha="left", fontsize=_suptitle_size)
     fig.tight_layout()
     return _save(fig, out)
 
@@ -314,9 +333,9 @@ def plot_compare(base: Run, alt: Run, alt_label: str, out: Path) -> Path:
 def make_all(source: str, out_dir: str | Path, overrides: dict[str, object] | None = None,
              compare: dict[str, object] | None = None, seed: bool = True,
              t_from: float | None = None, t_to: float | None = None,
-             rate: float | None = None) -> list[Path]:
-    """Все графики по источнику в каталог out_dir."""
-    _style()
+             rate: float | None = None, report: bool = False) -> list[Path]:
+    """Все графики по источнику в каталог out_dir. report - под ширину страницы отчёта."""
+    _style(report)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     full = collect(source, overrides, seed)
