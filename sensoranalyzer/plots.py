@@ -330,6 +330,12 @@ def _angles(quats: list) -> np.ndarray:
     return a
 
 
+def _legend_above(ax) -> None:
+    """Легенда над графиком справа, на одной строке с заголовком: кривые углов занимают всю
+    высоту, и внутри графика легенда их закрывает."""
+    ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=2, borderaxespad=0.1)
+
+
 def _bit_exact_note(ax, count: int, what: str) -> None:
     ax.text(0.5, 0.62, f"0 на всех {count} тактах{what}: модель совпадает с прошивкой бит в бит",
             transform=ax.transAxes, ha="center", va="bottom", color=INK2)
@@ -353,7 +359,7 @@ def plot_orientation(run: Run, out: Path) -> Path | None:
             ax.plot([c.t for c in checks], firmware[:, i], color=SLOT[1], ls="--", label="прошивка (кадр TICK)")
         ax.set_title(f"{name}, град", loc="left")
     if checks:
-        axs[0].legend(loc="best", ncol=2)
+        _legend_above(axs[0])
         compared = [c for c in checks if c.quat_checked]
         ax = axs[3]
         tc = np.array([c.t for c in compared])
@@ -398,7 +404,7 @@ def plot_correction(run: Run, out: Path) -> Path | None:
     if checks:
         ax.plot([c.t for c in checks], [c.tick.gain for c in checks], color=SLOT[1], ls="--",
                 label="прошивка (кадр TICK)")
-        ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=2, borderaxespad=0.1)
+        _legend_above(ax)
     ax.axhline(p.quat_acc_alpha, color=MUTED, lw=0.8, ls=":")
     ax.set_title(f"Коэффициент коррекции за такт  ·  наибольший {p.quat_acc_alpha:g} - в покое", loc="left")
     ax.set_xlabel("время, с")
@@ -418,7 +424,7 @@ def plot_orientation_compare(base: Run, alt: Run, alt_label: str, out: Path) -> 
         ax.plot([o.t for o in base.orientation], a[:, i], color=SLOT[0], label="параметры прошивки")
         ax.plot([o.t for o in alt.orientation], b[:, i], color=SLOT[1], lw=1.1, label=alt_label)
         ax.set_title(f"{name}, град", loc="left")
-    axs[0].legend(loc="best", ncol=2)
+    _legend_above(axs[0])
     axs[-1].set_xlabel("время, с")
     _suptitle(fig, f"Ориентация при других параметрах: {alt_label}\n" + _subtitle(base),
               x=0.01, ha="left", fontsize=_suptitle_size)
