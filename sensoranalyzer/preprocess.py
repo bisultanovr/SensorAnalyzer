@@ -69,10 +69,15 @@ class ProcessingParams:
     gyro_shift_limit: float  # порог неподвижности для оценки нуля, ед. АЦП
     gyro_scale: float        # чувствительность гироскопа, ед./(град/с)
     acc_calib: tuple[int, int, int, int, int, int]  # X min, X max, Y min, Y max, Z min, Z max
-    level_pitch: float       # поправка установки платы, град (нужна ориентации, ЛР3)
+    level_pitch: float       # поправка установки платы, град (ориентация, SetAccelShift)
     level_roll: float
     acc_k: float | None = None  # коэффициенты PT2, как их посчитала прошивка; None - считать здесь
     gyr_k: float | None = None
+    # Коррекция ориентации по акселерометру (IRS::RestoreQuat). В CONFIG их нет: в прошивке это
+    # константы, здесь - её значения по умолчанию
+    quat_acc_alpha: float = 0.01   # доля поправки за такт 100 Гц
+    quat_acc_max: float = 0.05     # отклонение |a| от 1 g, при котором поправка выключается, g
+    quat_gyr_max: float = 1000.0   # квадрат угловой скорости, при котором выключается, (град/с)^2
 
     @classmethod
     def from_config(cls, config: Config) -> ProcessingParams:
@@ -121,6 +126,11 @@ class ProcessingParams:
         c = self.acc_calib
         if not (c[0] < c[1] and c[2] < c[3] and c[4] < c[5]):
             errors.append(f"acc_calib = {c}: min должен быть меньше max по каждой оси")
+        if not 0 <= self.quat_acc_alpha <= 1:
+            errors.append(f"quat_acc_alpha = {self.quat_acc_alpha}: должен быть в [0, 1]")
+        for name in ("quat_acc_max", "quat_gyr_max"):
+            if getattr(self, name) <= 0:
+                errors.append(f"{name} = {getattr(self, name)}: должен быть положительным")
         return errors
 
 

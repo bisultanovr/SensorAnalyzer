@@ -1,5 +1,6 @@
 """Графики тракта: сигнал до и после фильтрации, спектр, АЧХ фильтров, ноль гироскопа модели и
-прошивки, неравномерность отсчётов и сетка дискретизации, сравнение двух наборов параметров.
+прошивки, неравномерность отсчётов и сетка дискретизации, ориентация модели и прошивки, работа
+коррекции по акселерометру, сравнение двух наборов параметров.
 
 Картинки - для проверки работы и для отчёта, поэтому статичные PNG на белом фоне. Оси X, Y, Z
 разнесены по отдельным графикам, а не раскрашены тремя цветами; на каждом графике не больше трёх
@@ -17,6 +18,7 @@ matplotlib.use("Agg")  # только файлы, без окна
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
+from .orientation import OrientationResult, pitch_roll_yaw  # noqa: E402
 from .pipeline import Pipeline, PipelineStats, TickCheck  # noqa: E402
 from .preprocess import ProcessingParams, Pt2Filter, SensorResult  # noqa: E402
 from .protocol import Config  # noqa: E402
@@ -85,6 +87,7 @@ class Run:
     checks: list[TickCheck] = field(default_factory=list)
     configs: list[tuple[Config, ProcessingParams]] = field(default_factory=list)
     stats: PipelineStats | None = None
+    orientation: list[OrientationResult] = field(default_factory=list)
 
     @property
     def params(self) -> ProcessingParams:
@@ -94,7 +97,8 @@ class Run:
         lo = -math.inf if t_from is None else t_from
         hi = math.inf if t_to is None else t_to
         return Run(self.name, [r for r in self.results if lo <= r.t <= hi],
-                   [c for c in self.checks if lo <= c.t <= hi], self.configs, self.stats)
+                   [c for c in self.checks if lo <= c.t <= hi], self.configs, self.stats,
+                   [o for o in self.orientation if lo <= o.t <= hi])
 
     def arrays(self) -> dict[str, np.ndarray]:
         r = self.results
@@ -120,7 +124,8 @@ def collect(source: str, overrides: dict[str, object] | None = None, seed: bool 
     run = Run(name or Path(source).name)
     pipeline = Pipeline(src, overrides=overrides, speed=0, seed=seed,
                         on_result=run.results.append, on_tick=run.checks.append,
-                        on_config=lambda c, p: run.configs.append((c, p)))
+                        on_config=lambda c, p: run.configs.append((c, p)),
+                        on_orientation=run.orientation.append)
     run.stats = pipeline.run()
     if run.stats.buffer_dropped:  # для файла не должно быть: буфер придерживает чтение
         raise RuntimeError(f"потеряно в буфере {run.stats.buffer_dropped} кадров")
@@ -311,6 +316,116 @@ def plot_sampling(run: Run, out: Path, rate: float, window: float = 0.1) -> Path
     return _save(fig, out)
 
 
+# --- ориентация -------------------------------------------------------------------------------
+ANGLES = ("Тангаж", "Крен", "Рыскание")
+
+
+def _angles(quats: list) -> np.ndarray:
+    """Тангаж, крен, рыскание по кватернионам, град. Рыскание - без скачков через 0/360,
+    от начального значения в пределах ±180."""
+    a = np.array([pitch_roll_yaw(q) for q in quats], dtype=float).reshape(-1, 3)
+    if len(a):
+        yaw = np.degrees(np.unwrap(np.radians(a[:, 2])))
+        a[:, 2] = yaw - 360.0 * round(yaw[0] / 360.0)
+    return a
+
+
+def _bit_exact_note(ax, count: int, what: str) -> None:
+    ax.text(0.5, 0.62, f"0 на всех {count} тактах{what}: модель совпадает с прошивкой бит в бит",
+            transform=ax.transAxes, ha="center", va="bottom", color=INK2)
+
+
+def plot_orientation(run: Run, out: Path) -> Path | None:
+    """Углы ориентации модели и, если в потоке есть такты прошивки, - прошивки и расхождение."""
+    if not run.orientation:
+        return None
+    t = np.array([o.t for o in run.orientation])
+    model = _angles([o.quat for o in run.orientation])
+    checks = [c for c in run.checks if c.orientation is not None]
+    rows = 4 if checks else 3
+    fig, axs = plt.subplots(rows, 1, figsize=_fs(11, 8 if checks else 6.2), sharex=True,
+                            gridspec_kw={"height_ratios": [1, 1, 1, 0.8][:rows]})
+    firmware = _angles([c.tick.quat for c in checks]) if checks else None
+    for i, name in enumerate(ANGLES):
+        ax = axs[i]
+        ax.plot(t, model[:, i], color=SLOT[0], label="модель на ПК")
+        if checks:
+            ax.plot([c.t for c in checks], firmware[:, i], color=SLOT[1], ls="--", label="прошивка (кадр TICK)")
+        ax.set_title(f"{name}, град", loc="left")
+    if checks:
+        axs[0].legend(loc="best", ncol=2)
+        compared = [c for c in checks if c.quat_checked]
+        ax = axs[3]
+        tc = np.array([c.t for c in compared])
+        diff = np.array([c.quat_diff for c in compared])
+        if len(diff) and (diff.max() > 0 or max(c.gain_diff for c in compared) > 0):
+            ax.semilogy(tc, np.where(diff > 0, diff, np.nan), color=SLOT[0], marker="o", ms=3, lw=0)
+            ax.set_title("Расхождение кватерниона модели и прошивки, максимум по компонентам", loc="left")
+        else:
+            ax.plot(tc, diff, color=SLOT[0])
+            ax.set_title("Расхождение кватерниона модели и прошивки", loc="left")
+            _bit_exact_note(ax, len(diff), " (и коэффициент коррекции тоже)")
+    axs[-1].set_xlabel("время, с")
+    source = "модель на ПК и прошивка" if checks else "модель на ПК, такты 100 Гц по времени отсчётов"
+    _suptitle(fig, f"Ориентация: {source}\n" + _subtitle(run), x=0.01, ha="left", fontsize=_suptitle_size)
+    fig.tight_layout()
+    return _save(fig, out)
+
+
+def plot_correction(run: Run, out: Path) -> Path | None:
+    """Почему коррекция по акселерометру то работает, то нет: модуль ускорения, угловая скорость
+    и коэффициент коррекции на каждом такте."""
+    o = run.orientation
+    if not o:
+        return None
+    p = run.params
+    t = np.array([x.t for x in o])
+    acc_dev = np.abs(np.linalg.norm(np.array([x.acc for x in o]), axis=1) - 1.0)
+    gyr = np.linalg.norm(np.array([x.gyr_avg for x in o]), axis=1)
+    gyr_lim = math.sqrt(p.quat_gyr_max)
+    fig, axs = plt.subplots(3, 1, figsize=_fs(11, 6.5), sharex=True)
+
+    for ax, values, limit, unit, what in ((axs[0], acc_dev, p.quat_acc_max, "g", "Отклонение модуля ускорения от 1 g"),
+                                          (axs[1], gyr, gyr_lim, "°/с", "Модуль угловой скорости, среднее за такт")):
+        ax.plot(t, values, color=SLOT[0])
+        ax.axhline(limit, color=MUTED, lw=0.8, ls="--")
+        ax.set_ylim(0, min(max(values.max(), limit) * 1.05, 4 * limit))
+        ax.set_title(f"{what}, {unit}  ·  пунктир - {limit:.3g} {unit}: выше коррекция выключается", loc="left")
+
+    ax = axs[2]
+    ax.plot(t, [x.gain for x in o], color=SLOT[0], label="модель на ПК")
+    checks = [c for c in run.checks if c.orientation is not None]
+    if checks:
+        ax.plot([c.t for c in checks], [c.tick.gain for c in checks], color=SLOT[1], ls="--",
+                label="прошивка (кадр TICK)")
+        ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=2, borderaxespad=0.1)
+    ax.axhline(p.quat_acc_alpha, color=MUTED, lw=0.8, ls=":")
+    ax.set_title(f"Коэффициент коррекции за такт  ·  наибольший {p.quat_acc_alpha:g} - в покое", loc="left")
+    ax.set_xlabel("время, с")
+    _suptitle(fig, "Коррекция ориентации по акселерометру\n" + _subtitle(run), x=0.01, ha="left", fontsize=_suptitle_size)
+    fig.tight_layout()
+    return _save(fig, out)
+
+
+def plot_orientation_compare(base: Run, alt: Run, alt_label: str, out: Path) -> Path | None:
+    if not base.orientation or not alt.orientation:
+        return None
+    a = _angles([o.quat for o in base.orientation])
+    b = _angles([o.quat for o in alt.orientation])
+    fig, axs = plt.subplots(3, 1, figsize=_fs(11, 6.2), sharex=True)
+    for i, name in enumerate(ANGLES):
+        ax = axs[i]
+        ax.plot([o.t for o in base.orientation], a[:, i], color=SLOT[0], label="параметры прошивки")
+        ax.plot([o.t for o in alt.orientation], b[:, i], color=SLOT[1], lw=1.1, label=alt_label)
+        ax.set_title(f"{name}, град", loc="left")
+    axs[0].legend(loc="best", ncol=2)
+    axs[-1].set_xlabel("время, с")
+    _suptitle(fig, f"Ориентация при других параметрах: {alt_label}\n" + _subtitle(base),
+              x=0.01, ha="left", fontsize=_suptitle_size)
+    fig.tight_layout()
+    return _save(fig, out)
+
+
 # --- сравнение параметров -----------------------------------------------------------------
 def plot_compare(base: Run, alt: Run, alt_label: str, out: Path) -> Path:
     a, b = base.arrays(), alt.arrays()
@@ -349,11 +464,14 @@ def make_all(source: str, out_dir: str | Path, overrides: dict[str, object] | No
         plot_response(run.params, out / "response.png"),
         plot_sampling(run, out / "sampling.png", rate or 100.0),
     ]
-    zero = plot_gyro_zero(run, out / "gyro_zero.png")
-    if zero:
-        files.append(zero)
+    files += [f for f in (plot_gyro_zero(run, out / "gyro_zero.png"),
+                          plot_orientation(run, out / "orientation.png"),
+                          plot_correction(run, out / "correction.png")) if f]
     if compare:
         alt = collect(source, {**(overrides or {}), **compare}, seed).window(t_from, t_to)
         label = ", ".join(f"{k}={v}" for k, v in compare.items())
         files.append(plot_compare(run, alt, label, out / "compare.png"))
+        orientation = plot_orientation_compare(run, alt, label, out / "compare_orientation.png")
+        if orientation:
+            files.append(orientation)
     return files

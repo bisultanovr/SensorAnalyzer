@@ -1,4 +1,4 @@
-"""Конвейер: источник -> кольцевой буфер -> синхронизация -> предварительная обработка."""
+"""Конвейер: источник -> кольцевой буфер -> синхронизация -> предварительная обработка -> ориентация."""
 from __future__ import annotations
 
 import threading
@@ -7,19 +7,25 @@ from dataclasses import dataclass
 
 from .buffer import RingBuffer
 from .clock import ReplayClock
+from .orientation import TICK_RATE, OrientationResult, OrientationStage
 from .preprocess import ProcessingParams, SensorResult, SensorStage
-from .protocol import Config, Frame, Sample, StreamTime, Tick
+from .protocol import FLAG_QUAT_RESET, Config, Frame, Sample, StreamTime, Tick
 from .resample import Resampler
 from .sources import SignalSource
 
 
 @dataclass(slots=True)
 class TickCheck:
-    """Такт прошивки рядом с моделью: насколько оценка нуля гироскопа модели расходится с ней."""
+    """Такт прошивки рядом с моделью: насколько оценка нуля гироскопа и ориентация модели
+    расходятся с ней."""
     tick: Tick
     t: float
     model_shift: tuple[float, float, float]
     shift_diff: float  # максимум по осям |модель - прошивка|, ед. АЦП
+    orientation: OrientationResult | None = None  # модель после этого такта
+    quat_checked: bool = False  # False - на этом такте кватернион модели подхвачен у прошивки
+    quat_diff: float = 0.0      # максимум по компонентам |модель - прошивка|
+    gain_diff: float = 0.0      # |модель - прошивка| коэффициента коррекции
 
 
 @dataclass(slots=True)
@@ -37,11 +43,21 @@ class PipelineStats:
     state_diff_max: float = 0.0  # состояние фильтров и ноль модель/прошивка по CONFIG v2
     state_checks: int = 0        # сколько раз состояние сравнивалось
     restarts: int = 0            # перезапуски платы посреди потока
+    quat_checks: int = 0         # такты, на которых кватернион модели сверен с прошивкой
+    quat_diff_max: float = 0.0   # кватернион модель/прошивка, максимум по компонентам
+    gain_diff_max: float = 0.0   # коэффициент коррекции по акселерометру модель/прошивка
+    quat_resyncs: int = 0        # кватернион подхвачен у прошивки заново после потерянных кадров
+    large_steps: int = 0         # повороты больше ~5 град за отсчёт (sinf/cosf, см. orientation)
 
     @property
     def bit_exact(self) -> bool:
         """Модель совпала с прошивкой без единого расхождения (было что сравнить)."""
         return self.state_checks > 0 and self.ticks > 0 and self.shift_diff_max == 0.0 and self.state_diff_max == 0.0
+
+    @property
+    def orientation_exact(self) -> bool:
+        """Ориентация модели совпала с прошивкой на всех сверенных тактах."""
+        return self.quat_checks > 0 and self.quat_diff_max == 0.0 and self.gain_diff_max == 0.0
 
 
 class Pipeline:
@@ -58,6 +74,11 @@ class Pipeline:
     Перезапуск платы посреди потока (номера кадров начались с нуля) распознаётся сам: прошивка
     тогда стартует с нулей, и модель тоже - с её первого отсчёта, независимо от seed. Время
     потока при этом продолжается, а не прыгает назад.
+
+    Ориентация с seed подхватывается с кватерниона первого TICK, без seed - стартует с единичного,
+    как прошивка. Потерянный кадр (пропуск номера) - это отсчёт или такт, который прошивка
+    обработала, а модель нет; тогда кватернион подхватывается заново со следующего TICK. Если
+    тактов в потоке нет (CSV), конвейер отсчитывает такты 100 Гц сам по времени отсчётов.
     """
 
     def __init__(self, source: SignalSource, *,
@@ -69,7 +90,8 @@ class Pipeline:
                  on_tick: Callable[[TickCheck], None] | None = None,
                  on_config: Callable[[Config, ProcessingParams], None] | None = None,
                  resampler: Resampler | None = None,
-                 on_grid: Callable[[SensorResult], None] | None = None) -> None:
+                 on_grid: Callable[[SensorResult], None] | None = None,
+                 on_orientation: Callable[[OrientationResult], None] | None = None) -> None:
         self.source = source
         self.overrides = dict(overrides or {})
         self.buffer: RingBuffer[Frame] = RingBuffer(buffer_capacity)
@@ -80,10 +102,17 @@ class Pipeline:
         self.on_config = on_config
         self.resampler = resampler  # блок дискретизации: отсчёты на сетку заданной частоты
         self.on_grid = on_grid
+        self.on_orientation = on_orientation
         self.stats = PipelineStats()
         self.params: ProcessingParams | None = None
         self.firmware_config: Config | None = None
         self._stage: SensorStage | None = None
+        self._orientation: OrientationStage | None = None
+        self._quat_synced = not seed     # кватернион модели идёт вместе с прошивкой
+        self._quat_ever_synced = False
+        self._own_ticks = not source.has_ticks  # такты 100 Гц отсчитывает конвейер
+        self._tick_origin: float | None = None
+        self._tick_index = 0
         self._time: StreamTime | None = None
         self._seq: dict[type, int] = {}
         self._filters_seeded = not seed
@@ -141,8 +170,11 @@ class Pipeline:
             raise ValueError("; ".join(errors))
         if self._stage is None:
             self._stage = SensorStage(params)
+            self._orientation = OrientationStage(params, self.firmware_config.timer_freq,
+                                                 self.source.measured_rate if self._own_ticks else None)
         else:
             self._stage.set_params(params)
+            self._orientation.set_params(params)
         self.params = params
         if self.on_config:
             self.on_config(self.firmware_config, params)
@@ -152,6 +184,7 @@ class Pipeline:
         if last is not None:
             gap = ((frame.seq - last) & 0xFFFF) - 1
             if gap:
+                self._quat_synced = False
                 if isinstance(frame, Sample):
                     self.stats.lost_samples += gap
                 else:
@@ -189,9 +222,12 @@ class Pipeline:
         self._time_offset = self._last_t + (1.0 / self.params.sample_rate if self.params else 0.0)
         self._time = None
         self._stage = None
+        self._orientation = None
         self.firmware_config = None
         self._from_boot = True
         self._filters_seeded = self._shift_seeded = True
+        self._quat_synced = True
+        self._tick_origin = None
 
     def _process(self, frame: Sample | Tick) -> None:
         t = self._time_offset + self._time.seconds(frame.time)
@@ -200,11 +236,14 @@ class Pipeline:
         if isinstance(frame, Sample):
             if self.clock is not None:
                 self.clock.wait_until(t)
+            if self._own_ticks:
+                self._run_own_ticks(t)
             if not self._filters_seeded:
                 self._stage.seed(sample=frame)
                 self._filters_seeded = True
             self.stats.samples += 1
             result = self._stage.process(frame, t)
+            self.stats.large_steps += self._orientation.sample(frame.time, result.acc_g, result.gyr_dps)
             if self.on_result:
                 self.on_result(result)
             if self.resampler is not None:
@@ -223,8 +262,42 @@ class Pipeline:
         if synced:
             self.stats.shift_diff_last = diff
             self.stats.shift_diff_max = max(self.stats.shift_diff_max, diff)
+
+        check = TickCheck(frame, t, model, diff)
+        o = self._orientation
+        o.tick(bool(frame.flags & FLAG_QUAT_RESET))
+        if self._quat_synced:
+            check.quat_checked = True
+            check.quat_diff = max(abs(m - f) for m, f in zip(o.quat, frame.quat))
+            check.gain_diff = abs(o.gain - frame.gain)
+            s = self.stats
+            s.quat_checks += 1
+            s.quat_diff_max = max(s.quat_diff_max, check.quat_diff)
+            s.gain_diff_max = max(s.gain_diff_max, check.gain_diff)
+        else:
+            # Поток начат с середины или кадры потеряны: дальше - с состояния прошивки
+            o.seed(frame.quat, frame.gain)
+            if self._quat_ever_synced:
+                self.stats.quat_resyncs += 1
+            self._quat_synced = True
+        self._quat_ever_synced = True
+        check.orientation = o.result(t)
+        if self.on_orientation:
+            self.on_orientation(check.orientation)
         if self.on_tick:
-            self.on_tick(TickCheck(frame, t, model, diff))
+            self.on_tick(check)
+
+    def _run_own_ticks(self, t: float) -> None:
+        """Такты 100 Гц, прошедшие до отсчёта со временем t, - для источника без кадров TICK.
+        Первый такт - через период после первого отсчёта."""
+        if self._tick_origin is None:
+            self._tick_origin, self._tick_index = t, 1
+            return
+        while (tick_t := self._tick_origin + self._tick_index / TICK_RATE) <= t:
+            self._tick_index += 1
+            self._orientation.tick()
+            if self.on_orientation:
+                self.on_orientation(self._orientation.result(tick_t))
 
     def _handle_config(self, frame: Config) -> None:
         self.stats.configs += 1

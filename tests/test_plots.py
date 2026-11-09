@@ -27,8 +27,9 @@ class PlotsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             files = make_all(str(DATA / "drone_boot_v2.imus"), d, compare={"gyr_cut_freq": 40.0}, t_from=1.0)
             names = sorted(p.name for p in files)
-            self.assertEqual(names, ["compare.png", "gyro_zero.png", "response.png", "sampling.png",
-                                     "signals.png", "spectrum.png"])
+            self.assertEqual(names, ["compare.png", "compare_orientation.png", "correction.png", "gyro_zero.png",
+                                     "orientation.png", "response.png", "sampling.png", "signals.png",
+                                     "spectrum.png"])
             for p in files:
                 self.assertGreater(p.stat().st_size, 10_000)
 

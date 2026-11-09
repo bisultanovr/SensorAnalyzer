@@ -9,6 +9,7 @@ import time
 from contextlib import nullcontext
 
 from .export import export_csv
+from .orientation import OrientationResult
 from .pipeline import Pipeline, TickCheck
 from .preprocess import ProcessingParams, SensorResult
 from .protocol import FLAG_ARMED, Config
@@ -62,7 +63,13 @@ class StatusPrinter:
         self.quiet = quiet
         self.last: SensorResult | None = None
         self.last_tick: TickCheck | None = None
+        self.last_orientation: OrientationResult | None = None
         self._next = 1.0
+
+    def attach(self) -> None:
+        p = self.pipeline
+        p.on_result, p.on_tick, p.on_config, p.on_orientation = (
+            self.on_result, self.on_tick, self.on_config, self.on_orientation)
 
     def on_config(self, config: Config, params: ProcessingParams) -> None:
         cut = "точные" if params.exact_cutoff else "по формуле RC"
@@ -82,14 +89,19 @@ class StatusPrinter:
     def on_tick(self, check: TickCheck) -> None:
         self.last_tick = check
 
+    def on_orientation(self, o: OrientationResult) -> None:
+        self.last_orientation = o
+
     def print_line(self) -> None:
-        s, r, c = self.pipeline.stats, self.last, self.last_tick
+        s, r, c, o = self.pipeline.stats, self.last, self.last_tick, self.last_orientation
         line = (f"t={r.t:7.2f} с  отсч {s.samples:6d}  буфер {len(self.pipeline.buffer):4d}  "
                 f"потери {s.lost_samples}/{s.lost_ticks}  a={_fmt(r.acc_g)} g  w={_fmt(r.gyr_dps, 2)} °/с  "
                 f"ноль={_fmt(r.gyro_shift, 2)}")
+        if o is not None:
+            line += "  тангаж/крен/рыск={:+.1f}/{:+.1f}/{:.1f}°  k={:.4f}".format(*o.angles, o.gain)
         if c is not None:
             armed = " АРМ" if c.tick.flags & FLAG_ARMED else ""
-            line += f"  Δноль={c.shift_diff:.1e}  k={c.tick.gain:.4f}{armed}"
+            line += f"  Δноль={c.shift_diff:.1e}  Δq={c.quat_diff:.1e}{armed}"
         print(line, flush=True)
 
 
@@ -108,7 +120,7 @@ def cmd_run(args) -> int:
                 return 1
         pipeline = Pipeline(source, overrides=overrides, speed=args.speed, seed=not args.no_seed)
         status = StatusPrinter(pipeline, quiet=args.quiet)
-        pipeline.on_result, pipeline.on_tick, pipeline.on_config = status.on_result, status.on_tick, status.on_config
+        status.attach()
         _stop_after(pipeline, args.seconds)
         started = time.perf_counter()
         try:
@@ -131,6 +143,13 @@ def cmd_run(args) -> int:
     if stats.state_checks:
         print(f"состояние фильтров и ноль по CONFIG ({stats.state_checks} сверок): макс. расхождение "
               f"{stats.state_diff_max:.2e}" + ("  -> модель совпадает с прошивкой бит в бит" if stats.bit_exact else ""))
+    if stats.quat_checks:
+        print(f"ориентация модель/прошивка ({stats.quat_checks} тактов): макс. расхождение кватерниона "
+              f"{stats.quat_diff_max:.2e}, коэффициента коррекции {stats.gain_diff_max:.2e}"
+              + ("  -> бит в бит" if stats.orientation_exact else "")
+              + (f"; подхвачен заново после потерь: {stats.quat_resyncs}" if stats.quat_resyncs else ""))
+    if status.last_orientation is not None:
+        print("ориентация в конце: тангаж {:+.2f}°, крен {:+.2f}°, рыскание {:.2f}°".format(*status.last_orientation.angles))
     return 0
 
 
@@ -139,7 +158,8 @@ def cmd_record(args) -> int:
         source = SerialSource(args.port, record_to=rec)
         pipeline = Pipeline(source)
         status = StatusPrinter(pipeline)
-        pipeline.on_result, pipeline.on_tick = status.on_result, status.on_tick
+        status.attach()
+        pipeline.on_config = None  # при записи настройки не печатаются, как и раньше
         _stop_after(pipeline, args.seconds)
         try:
             stats = pipeline.run()
@@ -257,7 +277,8 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--no-seed", action="store_true", help="запись снята с включения платы")
     rs.set_defaults(func=cmd_resample)
 
-    pl = sub.add_parser("plot", help="графики: до/после фильтрации, спектр, АЧХ, ноль гироскопа, дискретизация")
+    pl = sub.add_parser("plot", help="графики: до/после фильтрации, спектр, АЧХ, ноль гироскопа, дискретизация, "
+                                     "ориентация, коррекция по акселерометру")
     pl.add_argument("source", help="запись .imus или .csv")
     pl.add_argument("--out", default="plots", help="каталог для PNG (по умолчанию plots)")
     pl.add_argument("--set", action="append", metavar="ИМЯ=ЗНАЧЕНИЕ", help="переопределить параметр тракта")

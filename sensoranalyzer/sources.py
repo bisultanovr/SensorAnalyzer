@@ -42,6 +42,17 @@ class SignalSource(ABC):
         return False
 
     @property
+    def has_ticks(self) -> bool:
+        """В потоке есть такты прошивки (TICK). Если нет, такты 100 Гц отсчитывает конвейер."""
+        return True
+
+    @property
+    def measured_rate(self) -> float | None:
+        """Средняя частота отсчётов по самим данным - для источника без настроек прошивки (CSV),
+        где частота в CONFIG - номинал, а не измеренная. Известна после первого кадра."""
+        return None
+
+    @property
     def stats(self) -> dict[str, int]:
         return {}
 
@@ -127,6 +138,26 @@ class CsvSource(SignalSource):
         self.path = Path(path)
         self._config = config
         self._stop = threading.Event()
+        self._measured_rate: float | None = None
+
+    @property
+    def has_ticks(self) -> bool:
+        return False
+
+    @property
+    def measured_rate(self) -> float | None:
+        return self._measured_rate
+
+    def _measure_rate(self, time_col: str) -> float | None:
+        count, first, last = 0, None, None
+        with open(self.path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                last = int(row[time_col])
+                first = last if first is None else first
+                count += 1
+        if count < 2 or last <= first:
+            return None
+        return (count - 1) * CSV_TIME_COLUMNS[time_col] / (last - first)
 
     def validate(self, max_errors: int = 20) -> list[str]:
         """Проверка формата. Пустой список - файл годен."""
@@ -168,6 +199,7 @@ class CsvSource(SignalSource):
             header = reader.fieldnames or []
             time_col = next(c for c in CSV_TIME_COLUMNS if c in header)
             timer_freq = CSV_TIME_COLUMNS[time_col]
+            self._measured_rate = self._measure_rate(time_col)
             yield replace(self._config, timer_freq=timer_freq)
             has_flags = "calib_allowed" in header
             for seq, row in enumerate(reader):
